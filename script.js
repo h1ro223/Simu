@@ -1,266 +1,898 @@
 (() => {
   'use strict';
 
-  // localStorageに使うキー(このツール専用の名前空間)
-  const STORAGE_KEYS = {
-    html: 'lc_cartridge_html',
-    css: 'lc_cartridge_css',
-    js: 'lc_cartridge_js',
-    names: 'lc_cartridge_names',
-    savedAt: 'lc_cartridge_saved_at',
+  const TYPES = ['html', 'css', 'js'];
+  const LABEL = { html: 'HTML', css: 'CSS', js: 'JS' };
+  const DEFAULT_NAME = { html: 'index.html', css: 'style.css', js: 'script.js' };
+  const PLACEHOLDER = {
+    html: 'ここにHTMLを貼り付けることもできます',
+    css: 'ここにCSSを貼り付けることもできます',
+    js: 'ここにJSを貼り付けることもできます',
+  };
+  const CONSOLE_MAX = 300;
+
+  // ============================================================
+  //  状態
+  // ============================================================
+  const state = {
+    code: { html: '', css: '', js: '' },
+    names: { html: '', css: '', js: '' },
+    edited: { html: false, css: false, js: false },
+    savedAt: 0,
   };
 
-  const TYPES = ['html', 'css', 'js'];
+  let activeTab = 'html';
+  let saveTimer = null;
+  let persistRequested = false;
+  let blobUrls = [];
+  let blobNameMap = {};
+  let hasRun = false;
+  let errorCount = 0;
 
-  // 現在メモリ上に持っているコード
-  const code = { html: '', css: '', js: '' };
-  const names = { html: '', css: '', js: '' };
+  const $ = (id) => document.getElementById(id);
 
   const els = {
-    runBtn: document.getElementById('runBtn'),
-    clearBtn: document.getElementById('clearBtn'),
-    logText: document.getElementById('logText'),
-    previewFrame: document.getElementById('previewFrame'),
-    previewState: document.getElementById('previewState'),
-    cacheBadge: document.getElementById('cacheBadge'),
-    cacheBadgeText: document.getElementById('cacheBadgeText'),
+    bulkInput: $('input-bulk'),
+    runBtn: $('runBtn'),
+    exportBtn: $('exportBtn'),
+    clearAllBtn: $('clearAllBtn'),
+    logText: $('logText'),
+    cacheBadge: $('cacheBadge'),
+    cacheBadgeText: $('cacheBadgeText'),
+    preview: $('preview'),
+    previewFrame: $('previewFrame'),
+    previewState: $('previewState'),
+    previewEmpty: $('previewEmpty'),
+    reloadBtn: $('reloadBtn'),
+    fullBtn: $('fullBtn'),
+    consolePanel: $('consolePanel'),
+    consoleList: $('consoleList'),
+    consoleCount: $('consoleCount'),
+    consoleCopyBtn: $('consoleCopyBtn'),
+    consoleClearBtn: $('consoleClearBtn'),
+    consoleToggleBtn: $('consoleToggleBtn'),
+    editor: $('editor'),
+    tabs: Array.from(document.querySelectorAll('.tab')),
+    dropOverlay: $('dropOverlay'),
   };
 
-  const dropEls = {};
-  const nameEls = {};
-  const inputEls = {};
-
+  const slotEls = {};
   TYPES.forEach((t) => {
-    dropEls[t] = document.getElementById(`drop-${t}`);
-    nameEls[t] = document.getElementById(`name-${t}`);
-    inputEls[t] = document.getElementById(`input-${t}`);
+    slotEls[t] = {
+      root: $(`slot-${t}`),
+      name: $(`name-${t}`),
+      meta: $(`meta-${t}`),
+      input: $(`input-${t}`),
+      clear: $(`clear-${t}`),
+    };
   });
 
-  // ---------- ユーティリティ ----------
+  // ============================================================
+  //  保存領域(IndexedDB優先 / 使えない環境はlocalStorage)
+  // ============================================================
+  const Store = (() => {
+    const DB_NAME = 'local-cartridge';
+    const STORE_NAME = 'kv';
+    const LS_PREFIX = 'lc2_';
+    let dbPromise = null;
 
-  function readFileAsText(file) {
+    function openDB() {
+      if (dbPromise) return dbPromise;
+      dbPromise = new Promise((resolve, reject) => {
+        if (!('indexedDB' in window) || !window.indexedDB) {
+          reject(new Error('IndexedDB非対応'));
+          return;
+        }
+        let req;
+        try {
+          req = indexedDB.open(DB_NAME, 1);
+        } catch (err) {
+          reject(err);
+          return;
+        }
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains(STORE_NAME)) db.createObjectStore(STORE_NAME);
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+        req.onblocked = () => reject(new Error('IndexedDBがブロックされました'));
+      });
+      dbPromise.catch(() => { dbPromise = null; });
+      return dbPromise;
+    }
+
+    async function get(key) {
+      try {
+        const db = await openDB();
+        return await new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_NAME, 'readonly');
+          const req = tx.objectStore(STORE_NAME).get(key);
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+      } catch (err) {
+        try {
+          const raw = localStorage.getItem(LS_PREFIX + key);
+          return raw ? JSON.parse(raw) : undefined;
+        } catch (_) {
+          return undefined;
+        }
+      }
+    }
+
+    async function set(key, value) {
+      try {
+        const db = await openDB();
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_NAME, 'readwrite');
+          tx.objectStore(STORE_NAME).put(value, key);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error);
+        });
+        return true;
+      } catch (err) {
+        try {
+          localStorage.setItem(LS_PREFIX + key, JSON.stringify(value));
+          return true;
+        } catch (_) {
+          return false;
+        }
+      }
+    }
+
+    async function remove(key) {
+      try {
+        const db = await openDB();
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_NAME, 'readwrite');
+          tx.objectStore(STORE_NAME).delete(key);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        });
+      } catch (_) { /* 何もしない */ }
+      try { localStorage.removeItem(LS_PREFIX + key); } catch (_) { /* 何もしない */ }
+    }
+
+    return { get, set, remove };
+  })();
+
+  // ============================================================
+  //  ユーティリティ
+  // ============================================================
+  function pad2(n) { return String(n).padStart(2, '0'); }
+
+  function timeText(ms, withSeconds) {
+    const d = new Date(ms);
+    const now = new Date();
+    const sameDay = d.toDateString() === now.toDateString();
+    const hm = `${pad2(d.getHours())}:${pad2(d.getMinutes())}${withSeconds ? ':' + pad2(d.getSeconds()) : ''}`;
+    return sameDay ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+  }
+
+  function formatBytes(text) {
+    const size = new Blob([text]).size;
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+    return `${(size / 1024 / 1024).toFixed(2)} MB`;
+  }
+
+  function basename(path) {
+    const clean = String(path || '').split('#')[0].split('?')[0];
+    const parts = clean.split('/');
+    return (parts[parts.length - 1] || '').toLowerCase();
+  }
+
+  // http: / https: / data: / blob: / // で始まらないもの = ローカル参照
+  function isLocalRef(url) {
+    const u = String(url || '').trim();
+    if (!u) return false;
+    return !/^([a-z][a-z0-9+.-]*:|\/\/)/i.test(u);
+  }
+
+  // 拡張子とMIMEから種類を判定(iOSで「.js.txt」になる場合も考慮)
+  function detectType(file) {
+    let name = String(file.name || '').toLowerCase().trim();
+    name = name.replace(/\.txt$/, '');
+    if (/\.(html?|xhtml)$/.test(name)) return 'html';
+    if (/\.css$/.test(name)) return 'css';
+    if (/\.(m?js|cjs)$/.test(name)) return 'js';
+    const mime = String(file.type || '').toLowerCase();
+    if (mime.includes('html')) return 'html';
+    if (mime.includes('css')) return 'css';
+    if (mime.includes('javascript') || mime.includes('ecmascript')) return 'js';
+    return null;
+  }
+
+  function readText(file) {
+    if (typeof file.text === 'function') return file.text();
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = () => reject(reader.error);
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(reader.error || new Error('読み込みエラー'));
       reader.readAsText(file, 'UTF-8');
     });
   }
 
-  function extensionMatches(type, fileName) {
-    const lower = fileName.toLowerCase();
-    if (type === 'html') return lower.endsWith('.html') || lower.endsWith('.htm');
-    if (type === 'css') return lower.endsWith('.css');
-    if (type === 'js') return lower.endsWith('.js');
-    return false;
-  }
-
-  function setLog(message) {
+  function setLog(message, kind) {
     els.logText.textContent = message;
+    els.logText.className = 'log' + (kind ? ` is-${kind}` : '');
   }
 
-  function updateRunButtonState() {
-    els.runBtn.disabled = code.html.trim().length === 0;
-  }
-
-  function markSlotLoaded(type, fileName) {
-    nameEls[type].textContent = fileName;
-    dropEls[type].classList.add('is-loaded');
-  }
-
-  function markSlotEmpty(type) {
-    nameEls[type].textContent = 'ファイル未選択';
-    dropEls[type].classList.remove('is-loaded');
-  }
-
-  function updateCacheBadge(hasCache, savedAt) {
-    if (!hasCache) {
-      els.cacheBadge.classList.remove('is-active');
-      els.cacheBadgeText.textContent = 'キャッシュ未使用';
-      return;
-    }
-    els.cacheBadge.classList.add('is-active');
-    if (savedAt) {
-      const d = new Date(Number(savedAt));
-      const hh = String(d.getHours()).padStart(2, '0');
-      const mm = String(d.getMinutes()).padStart(2, '0');
-      els.cacheBadgeText.textContent = `キャッシュ保持中(${hh}:${mm}保存)`;
+  // ============================================================
+  //  表示更新
+  // ============================================================
+  function renderSlot(type) {
+    const s = slotEls[type];
+    const text = state.code[type];
+    if (text) {
+      s.root.classList.add('is-loaded');
+      s.name.textContent = state.names[type] || DEFAULT_NAME[type];
+      s.meta.textContent = `${formatBytes(text)}${state.edited[type] ? ' / 編集済み' : ''}`;
+      s.clear.hidden = false;
     } else {
-      els.cacheBadgeText.textContent = 'キャッシュ保持中';
+      s.root.classList.remove('is-loaded');
+      s.name.textContent = '未選択';
+      s.meta.textContent = type === 'html' ? '必須' : '任意';
+      s.clear.hidden = true;
     }
   }
 
-  // ---------- 保存・復元 ----------
+  function renderButtons() {
+    const hasHtml = state.code.html.trim().length > 0;
+    els.runBtn.disabled = !hasHtml;
+    els.exportBtn.disabled = !hasHtml;
+    els.reloadBtn.disabled = !hasHtml;
+  }
 
-  function saveToStorage() {
-    try {
-      localStorage.setItem(STORAGE_KEYS.html, code.html);
-      localStorage.setItem(STORAGE_KEYS.css, code.css);
-      localStorage.setItem(STORAGE_KEYS.js, code.js);
-      localStorage.setItem(STORAGE_KEYS.names, JSON.stringify(names));
-      const savedAt = Date.now();
-      localStorage.setItem(STORAGE_KEYS.savedAt, String(savedAt));
-      updateCacheBadge(true, savedAt);
-      return true;
-    } catch (err) {
-      setLog('保存に失敗しました(ブラウザの容量制限の可能性があります)。プレビューは実行できます。');
-      return false;
+  function renderBadge(status) {
+    els.cacheBadge.classList.remove('is-active', 'is-error');
+    if (status === 'error') {
+      els.cacheBadge.classList.add('is-error');
+      els.cacheBadgeText.textContent = '保存失敗';
+      return;
+    }
+    const hasAny = TYPES.some((t) => state.code[t]);
+    if (hasAny && state.savedAt) {
+      els.cacheBadge.classList.add('is-active');
+      els.cacheBadgeText.textContent = `保存済み ${timeText(state.savedAt)}`;
+    } else {
+      els.cacheBadgeText.textContent = '未保存';
     }
   }
 
-  function loadFromStorage() {
-    try {
-      const savedHtml = localStorage.getItem(STORAGE_KEYS.html);
-      if (!savedHtml) {
-        updateCacheBadge(false);
-        return false;
-      }
-      code.html = savedHtml || '';
-      code.css = localStorage.getItem(STORAGE_KEYS.css) || '';
-      code.js = localStorage.getItem(STORAGE_KEYS.js) || '';
-
-      const savedNamesRaw = localStorage.getItem(STORAGE_KEYS.names);
-      if (savedNamesRaw) {
-        const savedNames = JSON.parse(savedNamesRaw);
-        TYPES.forEach((t) => { names[t] = savedNames[t] || ''; });
-      }
-
-      TYPES.forEach((t) => {
-        if (code[t]) markSlotLoaded(t, names[t] || `${t}(キャッシュ)`);
-      });
-
-      const savedAt = localStorage.getItem(STORAGE_KEYS.savedAt);
-      updateCacheBadge(true, savedAt);
-      setLog('前回のキャッシュを読み込みました。「実行する」で再プレビューできます。');
-      return true;
-    } catch (err) {
-      updateCacheBadge(false);
-      return false;
-    }
+  function renderAll() {
+    TYPES.forEach(renderSlot);
+    renderButtons();
+    renderBadge();
   }
 
-  function clearStorage() {
-    Object.values(STORAGE_KEYS).forEach((key) => localStorage.removeItem(key));
-    TYPES.forEach((t) => {
-      code[t] = '';
-      names[t] = '';
-      markSlotEmpty(t);
+  function markPreviewStale() {
+    if (!hasRun) return;
+    els.previewState.textContent = '変更あり(未反映)';
+    els.previewState.classList.add('is-stale');
+  }
+
+  // ============================================================
+  //  保存・復元
+  // ============================================================
+  function scheduleSave() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveNow, 400);
+  }
+
+  async function saveNow() {
+    clearTimeout(saveTimer);
+    const hasAny = TYPES.some((t) => state.code[t]);
+    if (!hasAny) {
+      await Store.remove('project');
+      state.savedAt = 0;
+      renderBadge();
+      return;
+    }
+    state.savedAt = Date.now();
+    const ok = await Store.set('project', {
+      code: { ...state.code },
+      names: { ...state.names },
+      edited: { ...state.edited },
+      savedAt: state.savedAt,
     });
-    els.previewFrame.srcdoc = '';
-    els.previewState.textContent = '未実行';
-    updateCacheBadge(false);
-    updateRunButtonState();
-    setLog('キャッシュを削除しました。ファイルを選び直してください。');
+    if (!ok) {
+      renderBadge('error');
+      setLog('保存に失敗しました(容量不足の可能性)。プレビューは実行できます。', 'error');
+      return;
+    }
+    renderBadge();
+    // ストレージを消されにくくする(対応ブラウザのみ)
+    if (!persistRequested && navigator.storage && typeof navigator.storage.persist === 'function') {
+      persistRequested = true;
+      navigator.storage.persist().catch(() => {});
+    }
   }
 
-  // ---------- ファイル取り込み ----------
+  // v1(localStorage版)のデータがあれば引き継ぐ
+  function readLegacy() {
+    try {
+      const html = localStorage.getItem('lc_cartridge_html');
+      if (!html) return null;
+      let names = {};
+      try { names = JSON.parse(localStorage.getItem('lc_cartridge_names') || '{}') || {}; } catch (_) { names = {}; }
+      const data = {
+        code: {
+          html,
+          css: localStorage.getItem('lc_cartridge_css') || '',
+          js: localStorage.getItem('lc_cartridge_js') || '',
+        },
+        names,
+        edited: {},
+        savedAt: Number(localStorage.getItem('lc_cartridge_saved_at')) || Date.now(),
+      };
+      ['lc_cartridge_html', 'lc_cartridge_css', 'lc_cartridge_js', 'lc_cartridge_names', 'lc_cartridge_saved_at']
+        .forEach((k) => localStorage.removeItem(k));
+      return data;
+    } catch (_) {
+      return null;
+    }
+  }
 
-  async function handleIncomingFile(type, file) {
-    if (!file) return;
-    if (!extensionMatches(type, file.name)) {
-      setLog(`「${file.name}」は${type.toUpperCase()}スロットの拡張子と一致しません。`);
+  async function loadProject() {
+    let data = await Store.get('project');
+    let migrated = false;
+    if (!data) {
+      data = readLegacy();
+      migrated = !!data;
+    }
+    if (!data || !data.code) return false;
+
+    TYPES.forEach((t) => {
+      state.code[t] = typeof data.code[t] === 'string' ? data.code[t] : '';
+      state.names[t] = (data.names && data.names[t]) || (state.code[t] ? DEFAULT_NAME[t] : '');
+      state.edited[t] = !!(data.edited && data.edited[t]);
+    });
+    state.savedAt = Number(data.savedAt) || 0;
+
+    if (migrated) await saveNow();
+    return TYPES.some((t) => state.code[t]);
+  }
+
+  // ============================================================
+  //  コードのセット
+  // ============================================================
+  function setCode(type, text, name, edited) {
+    state.code[type] = text;
+    state.names[type] = text ? (name || state.names[type] || DEFAULT_NAME[type]) : '';
+    state.edited[type] = !!edited && !!text;
+    renderSlot(type);
+    renderButtons();
+    if (type === activeTab && els.editor.value !== text) {
+      els.editor.value = text;
+    }
+    scheduleSave();
+  }
+
+  // ============================================================
+  //  ファイル読み込み
+  // ============================================================
+  async function importFiles(fileList, forcedType) {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+
+    const assigned = {};
+    const loaded = [];
+    const notes = [];
+
+    for (const file of files) {
+      const detected = detectType(file);
+      let type = detected;
+
+      if (forcedType) {
+        if (detected && detected !== forcedType) {
+          notes.push(`${file.name} は${LABEL[detected]}として読み込み`);
+        } else {
+          type = forcedType; // 判別不能でも押したスロットに入れる
+        }
+      }
+
+      if (!type) {
+        notes.push(`${file.name} は種類を判別できないのでスキップ`);
+        continue;
+      }
+      if (assigned[type]) {
+        notes.push(`${file.name} はスキップ(${LABEL[type]}が複数)`);
+        continue;
+      }
+
+      try {
+        const text = await readText(file);
+        if (text.indexOf('\u0000') !== -1) {
+          notes.push(`${file.name} はテキストファイルではありません`);
+          continue;
+        }
+        assigned[type] = true;
+        setCode(type, text, file.name, false);
+        loaded.push(`${LABEL[type]}: ${file.name}`);
+      } catch (err) {
+        notes.push(`${file.name} の読み込みに失敗(${err && err.message ? err.message : 'エラー'})`);
+      }
+    }
+
+    const parts = [];
+    if (loaded.length) parts.push(`読み込み完了 ${loaded.join(' / ')}`);
+    if (notes.length) parts.push(notes.join(' / '));
+    setLog(parts.join('  ') || '読み込めるファイルがありませんでした。', notes.length ? 'warn' : 'ok');
+
+    if (loaded.length) {
+      await saveNow();
+      if (state.code.html.trim()) runPreview();
+    }
+  }
+
+  // ============================================================
+  //  プレビュー用HTMLの組み立て
+  // ============================================================
+  // iframe内のconsoleやエラーを親画面に送るブリッジ
+  const BRIDGE_CODE = '(function(){' +
+    'var send=function(level,args,extra){try{' +
+      'var msg=Array.prototype.map.call(args,function(a){' +
+        'if(a instanceof Error)return a.name+": "+a.message;' +
+        'if(a!==null&&typeof a==="object"){try{return JSON.stringify(a)}catch(_){return String(a)}}' +
+        'return String(a)}).join(" ");' +
+      'parent.postMessage({__lcBridge:true,level:level,msg:msg,file:(extra&&extra.file)||"",line:(extra&&extra.line)||0},"*")' +
+    '}catch(_){}};' +
+    '["log","info","warn","error"].forEach(function(k){var o=console[k];console[k]=function(){send(k,arguments);if(o)return o.apply(console,arguments)}});' +
+    'window.addEventListener("error",function(e){' +
+      'if(e.target&&e.target!==window&&e.target.tagName){var src=e.target.src||e.target.href||"";send("warn",["読み込み失敗: <"+e.target.tagName.toLowerCase()+"> "+src]);return}' +
+      'send("error",[e.message||"Error"],{file:e.filename,line:e.lineno})},true);' +
+    'window.addEventListener("unhandledrejection",function(e){var r=e.reason;send("error",["Promise: "+(r&&r.message?r.message:String(r))])});' +
+  '})();';
+
+  function escapeInlineScript(js) {
+    return js.replace(/<\/script/gi, '<\\/script');
+  }
+
+  function revokeBlobs() {
+    blobUrls.forEach((u) => URL.revokeObjectURL(u));
+    blobUrls = [];
+    blobNameMap = {};
+  }
+
+  function makeBlobUrl(text, mime, name) {
+    const url = URL.createObjectURL(new Blob([text], { type: mime }));
+    blobUrls.push(url);
+    blobNameMap[url] = name;
+    return url;
+  }
+
+  /**
+   * mode: 'preview' … Blob URLで差し替え(行番号がファイル通りになる)
+   *       'inline'  … style/scriptタグに直接埋め込み(書き出し用)
+   */
+  function buildDocument(mode) {
+    const source = state.code.html;
+    const doc = new DOMParser().parseFromString(source, 'text/html');
+    const hadDoctype = /^\s*(<!--[\s\S]*?-->\s*)*<!doctype/i.test(source);
+    const notes = [];
+
+    const cssText = state.code.css;
+    const jsText = state.code.js;
+    const cssName = state.names.css || DEFAULT_NAME.css;
+    const jsName = state.names.js || DEFAULT_NAME.js;
+
+    const cssUrl = mode === 'preview' && cssText ? makeBlobUrl(cssText, 'text/css', cssName) : '';
+    const jsUrl = mode === 'preview' && jsText ? makeBlobUrl(jsText, 'text/javascript', jsName) : '';
+
+    const localLinks = Array.from(doc.querySelectorAll('link[href]')).filter((el) =>
+      /(^|\s)stylesheet(\s|$)/i.test(el.getAttribute('rel') || '') && isLocalRef(el.getAttribute('href')));
+    const localScripts = Array.from(doc.querySelectorAll('script[src]')).filter((el) =>
+      isLocalRef(el.getAttribute('src')));
+
+    const pickTarget = (list, attr, name, fallback) => {
+      const wanted = [basename(name), basename(fallback)];
+      return list.find((el) => wanted.includes(basename(el.getAttribute(attr)))) || list[0] || null;
+    };
+
+    const cssTarget = cssText ? pickTarget(localLinks, 'href', cssName, DEFAULT_NAME.css) : null;
+    const jsTarget = jsText ? pickTarget(localScripts, 'src', jsName, DEFAULT_NAME.js) : null;
+
+    const makeStyleNode = () => {
+      if (mode === 'preview') {
+        const link = doc.createElement('link');
+        link.setAttribute('rel', 'stylesheet');
+        link.setAttribute('href', cssUrl);
+        return link;
+      }
+      const style = doc.createElement('style');
+      style.textContent = cssText;
+      return style;
+    };
+
+    // CSS参照の処理(読み込んだCSSに差し替え、それ以外のローカル参照は除去)
+    localLinks.forEach((link) => {
+      if (link === cssTarget) {
+        if (mode === 'preview') {
+          link.setAttribute('href', cssUrl);
+          link.removeAttribute('integrity');
+        } else {
+          link.replaceWith(makeStyleNode());
+        }
+      } else {
+        notes.push(`未読み込みのCSS参照を除外: ${link.getAttribute('href')}`);
+        link.remove();
+      }
+    });
+    if (cssText && !cssTarget) doc.head.appendChild(makeStyleNode());
+
+    // JS参照の処理
+    localScripts.forEach((script) => {
+      if (script === jsTarget) {
+        if (mode === 'preview') {
+          script.setAttribute('src', jsUrl);
+          script.removeAttribute('integrity');
+        } else {
+          const inline = doc.createElement('script');
+          Array.from(script.attributes).forEach((attr) => {
+            if (!['src', 'integrity', 'defer', 'async'].includes(attr.name)) inline.setAttribute(attr.name, attr.value);
+          });
+          inline.textContent = escapeInlineScript(jsText);
+          const isModule = (script.getAttribute('type') || '').toLowerCase() === 'module';
+          if (script.hasAttribute('defer') && !isModule) {
+            script.remove();
+            doc.body.appendChild(inline);
+          } else {
+            script.replaceWith(inline);
+          }
+        }
+      } else {
+        notes.push(`未読み込みのJS参照を除外: ${script.getAttribute('src')}`);
+        script.remove();
+      }
+    });
+    if (jsText && !jsTarget) {
+      const s = doc.createElement('script');
+      if (mode === 'preview') s.setAttribute('src', jsUrl);
+      else s.textContent = escapeInlineScript(jsText);
+      doc.body.appendChild(s);
+    }
+
+    if (mode === 'preview') {
+      const bridge = doc.createElement('script');
+      bridge.textContent = BRIDGE_CODE;
+      doc.head.insertBefore(bridge, doc.head.firstChild);
+    }
+
+    const html = (hadDoctype ? '<!DOCTYPE html>\n' : '') + doc.documentElement.outerHTML;
+    return { html, notes };
+  }
+
+  // ============================================================
+  //  実行・書き出し
+  // ============================================================
+  function runPreview() {
+    if (!state.code.html.trim()) {
+      setLog('HTMLが未選択です。まずHTMLを読み込んでください。', 'warn');
+      return;
+    }
+    revokeBlobs();
+    clearConsole();
+    let result;
+    try {
+      result = buildDocument('preview');
+    } catch (err) {
+      setLog(`プレビューの組み立てに失敗しました: ${err.message}`, 'error');
+      return;
+    }
+    addConsole('system', `実行 ${timeText(Date.now(), true)}`);
+    result.notes.forEach((n) => addConsole('warn', n));
+
+    els.previewFrame.srcdoc = result.html;
+    els.previewEmpty.hidden = true;
+    hasRun = true;
+    els.previewState.textContent = `実行中 ${timeText(Date.now(), true)}`;
+    els.previewState.classList.remove('is-stale');
+  }
+
+  function exportFile() {
+    if (!state.code.html.trim()) return;
+    let result;
+    try {
+      result = buildDocument('inline');
+    } catch (err) {
+      setLog(`書き出しに失敗しました: ${err.message}`, 'error');
+      return;
+    }
+    const blob = new Blob([result.html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'index.html';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    setLog('CSS/JSを埋め込んだ1ファイル(index.html)を書き出しました。', 'ok');
+  }
+
+  async function clearAll() {
+    if (!window.confirm('保存中のHTML/CSS/JSをすべて削除します。よろしいですか?')) return;
+    TYPES.forEach((t) => {
+      state.code[t] = '';
+      state.names[t] = '';
+      state.edited[t] = false;
+    });
+    state.savedAt = 0;
+    clearTimeout(saveTimer);
+    await Store.remove('project');
+    revokeBlobs();
+    els.previewFrame.srcdoc = '';
+    els.previewEmpty.hidden = false;
+    hasRun = false;
+    els.previewState.textContent = '未実行';
+    els.previewState.classList.remove('is-stale');
+    els.editor.value = '';
+    clearConsole();
+    renderAll();
+    setLog('キャッシュを削除しました。', 'ok');
+  }
+
+  // ============================================================
+  //  コンソール
+  // ============================================================
+  function updateErrorCount() {
+    els.consoleCount.hidden = errorCount === 0;
+    els.consoleCount.textContent = String(errorCount);
+  }
+
+  function clearConsole() {
+    els.consoleList.innerHTML = '';
+    errorCount = 0;
+    updateErrorCount();
+  }
+
+  function addConsole(level, message, where) {
+    const list = els.consoleList;
+    while (list.children.length >= CONSOLE_MAX) list.removeChild(list.firstChild);
+
+    const li = document.createElement('li');
+    li.className = `console__item console__item--${level}`;
+    li.textContent = message;
+    if (where) {
+      const span = document.createElement('span');
+      span.className = 'console__where';
+      span.textContent = where;
+      li.appendChild(span);
+    }
+    list.appendChild(li);
+    list.scrollTop = list.scrollHeight;
+
+    if (level === 'error') {
+      errorCount += 1;
+      updateErrorCount();
+    }
+  }
+
+  window.addEventListener('message', (e) => {
+    if (e.source !== els.previewFrame.contentWindow) return;
+    const data = e.data;
+    if (!data || data.__lcBridge !== true) return;
+    const level = ['log', 'info', 'warn', 'error'].includes(data.level) ? data.level : 'log';
+    let where = '';
+    if (data.file && blobNameMap[data.file]) {
+      where = `${blobNameMap[data.file]}${data.line ? ':' + data.line : ''}`;
+    } else if (data.line) {
+      where = 'HTML内';
+    }
+    addConsole(level, String(data.msg || ''), where);
+  });
+
+  async function copyConsole() {
+    const text = Array.from(els.consoleList.children).map((li) => li.textContent).join('\n');
+    if (!text) {
+      setLog('コンソールは空です。', 'warn');
       return;
     }
     try {
-      const text = await readFileAsText(file);
-      code[type] = text;
-      names[type] = file.name;
-      markSlotLoaded(type, file.name);
-      updateRunButtonState();
-      saveToStorage();
-      setLog(`${type.toUpperCase()}を読み込みました(${file.name})。「実行する」でプレビューします。`);
-    } catch (err) {
-      setLog(`${type.toUpperCase()}の読み込みに失敗しました: ${err.message}`);
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.top = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+      }
+      setLog('コンソールの内容をコピーしました。', 'ok');
+    } catch (_) {
+      setLog('コピーに失敗しました。', 'error');
     }
   }
 
-  // ---------- プレビュー実行 ----------
-
-  function buildCombinedHtml() {
-    let html = code.html;
-
-    // <style>を</head>直前に差し込む(</head>がない場合は先頭に追加)
-    const styleBlock = code.css ? `<style>\n${code.css}\n</style>` : '';
-    if (styleBlock) {
-      if (/<\/head>/i.test(html)) {
-        html = html.replace(/<\/head>/i, `${styleBlock}\n</head>`);
-      } else {
-        html = styleBlock + '\n' + html;
-      }
-    }
-
-    // <script>を</body>直前に差し込む(</body>がない場合は末尾に追加)
-    const scriptBlock = code.js ? `<script>\n${code.js}\n<\/script>` : '';
-    if (scriptBlock) {
-      if (/<\/body>/i.test(html)) {
-        html = html.replace(/<\/body>/i, `${scriptBlock}\n</body>`);
-      } else {
-        html = html + '\n' + scriptBlock;
-      }
-    }
-
-    return html;
+  // ============================================================
+  //  エディタ
+  // ============================================================
+  function showTab(type) {
+    activeTab = type;
+    els.tabs.forEach((tab) => {
+      const on = tab.dataset.tab === type;
+      tab.classList.toggle('is-active', on);
+      tab.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    els.editor.value = state.code[type];
+    els.editor.placeholder = PLACEHOLDER[type];
+    els.editor.scrollTop = 0;
+    els.editor.scrollLeft = 0;
   }
 
-  function runPreview() {
-    if (!code.html.trim()) {
-      setLog('HTMLファイルが未選択です。まずHTMLを読み込んでください。');
+  function onEditorInput() {
+    const type = activeTab;
+    const text = els.editor.value;
+    state.code[type] = text;
+    if (text) {
+      if (!state.names[type]) state.names[type] = DEFAULT_NAME[type];
+      state.edited[type] = true;
+    } else {
+      state.names[type] = '';
+      state.edited[type] = false;
+    }
+    renderSlot(type);
+    renderButtons();
+    markPreviewStale();
+    scheduleSave();
+  }
+
+  els.tabs.forEach((tab) => {
+    tab.addEventListener('click', () => showTab(tab.dataset.tab));
+  });
+
+  els.editor.addEventListener('input', onEditorInput);
+
+  els.editor.addEventListener('keydown', (e) => {
+    // Tabキーでインデント
+    if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      const start = els.editor.selectionStart;
+      const end = els.editor.selectionEnd;
+      if (typeof els.editor.setRangeText === 'function') {
+        els.editor.setRangeText('  ', start, end, 'end');
+      } else {
+        const v = els.editor.value;
+        els.editor.value = v.slice(0, start) + '  ' + v.slice(end);
+        els.editor.selectionStart = els.editor.selectionEnd = start + 2;
+      }
+      onEditorInput();
       return;
     }
-    const combined = buildCombinedHtml();
-    els.previewFrame.srcdoc = combined;
-    const now = new Date();
-    const hh = String(now.getHours()).padStart(2, '0');
-    const mm = String(now.getMinutes()).padStart(2, '0');
-    const ss = String(now.getSeconds()).padStart(2, '0');
-    els.previewState.textContent = `実行中(${hh}:${mm}:${ss})`;
-  }
+    // Ctrl/Cmd + Enter で実行
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      saveNow();
+      runPreview();
+    }
+  });
 
-  // ---------- イベント登録 ----------
+  // ============================================================
+  //  イベント登録
+  // ============================================================
+  els.bulkInput.addEventListener('change', async (e) => {
+    const input = e.target;
+    await importFiles(input.files, null);
+    input.value = '';
+  });
 
   TYPES.forEach((type) => {
-    const dropEl = dropEls[type];
-    const inputEl = inputEls[type];
-
-    dropEl.addEventListener('click', () => inputEl.click());
-    dropEl.setAttribute('tabindex', '0');
-    dropEl.setAttribute('role', 'button');
-    dropEl.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        inputEl.click();
-      }
+    const s = slotEls[type];
+    s.input.addEventListener('change', async (e) => {
+      const input = e.target;
+      await importFiles(input.files, type);
+      input.value = '';
     });
-
-    inputEl.addEventListener('change', (e) => {
-      const file = e.target.files && e.target.files[0];
-      handleIncomingFile(type, file);
-      inputEl.value = '';
-    });
-
-    dropEl.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      dropEl.classList.add('is-dragover');
-    });
-    dropEl.addEventListener('dragleave', () => {
-      dropEl.classList.remove('is-dragover');
-    });
-    dropEl.addEventListener('drop', (e) => {
-      e.preventDefault();
-      dropEl.classList.remove('is-dragover');
-      const file = e.dataTransfer.files && e.dataTransfer.files[0];
-      handleIncomingFile(type, file);
+    s.clear.addEventListener('click', () => {
+      setCode(type, '', '', false);
+      markPreviewStale();
+      setLog(`${LABEL[type]}を外しました。`, 'ok');
     });
   });
 
-  els.runBtn.addEventListener('click', runPreview);
-  els.clearBtn.addEventListener('click', clearStorage);
+  els.runBtn.addEventListener('click', () => { saveNow(); runPreview(); });
+  els.reloadBtn.addEventListener('click', runPreview);
+  els.exportBtn.addEventListener('click', exportFile);
+  els.clearAllBtn.addEventListener('click', clearAll);
 
-  // ---------- 初期化 ----------
-
-  const restored = loadFromStorage();
-  updateRunButtonState();
-  if (restored && code.html.trim()) {
-    runPreview();
+  // 全画面
+  function setFull(on) {
+    els.preview.classList.toggle('is-full', on);
+    document.body.classList.toggle('is-locked', on);
+    els.fullBtn.textContent = on ? '閉じる' : '全画面';
   }
+  els.fullBtn.addEventListener('click', () => setFull(!els.preview.classList.contains('is-full')));
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && els.preview.classList.contains('is-full')) setFull(false);
+  });
+
+  // コンソール操作
+  els.consoleClearBtn.addEventListener('click', clearConsole);
+  els.consoleCopyBtn.addEventListener('click', copyConsole);
+  els.consoleToggleBtn.addEventListener('click', () => {
+    const collapsed = els.consolePanel.classList.toggle('is-collapsed');
+    els.consoleToggleBtn.textContent = collapsed ? '開く' : '閉じる';
+    els.consoleToggleBtn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  });
+
+  // ドラッグ&ドロップ(PC)
+  let dragDepth = 0;
+  const hasFiles = (e) => !!(e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files'));
+
+  document.addEventListener('dragenter', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    dragDepth += 1;
+    document.body.classList.add('is-dragging');
+  });
+  document.addEventListener('dragover', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  });
+  document.addEventListener('dragleave', (e) => {
+    if (!hasFiles(e)) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) document.body.classList.remove('is-dragging');
+  });
+  document.addEventListener('drop', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    dragDepth = 0;
+    document.body.classList.remove('is-dragging');
+    importFiles(e.dataTransfer.files, null);
+  });
+
+  // ページを離れる直前に未保存分を保存
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && saveTimer) saveNow();
+  });
+
+  // ============================================================
+  //  スマホ(Safari)対策:ダブルタップ拡大・ピンチ拡大・長押しメニュー
+  // ============================================================
+  const isEditable = (el) => !!(el && el.closest && el.closest('textarea, input, select, [contenteditable="true"]'));
+
+  let lastTouchEnd = 0;
+  document.addEventListener('touchend', (e) => {
+    const now = Date.now();
+    if (now - lastTouchEnd <= 320 && !isEditable(e.target)) e.preventDefault();
+    lastTouchEnd = now;
+  }, { passive: false });
+
+  ['gesturestart', 'gesturechange', 'gestureend'].forEach((type) => {
+    document.addEventListener(type, (e) => e.preventDefault(), { passive: false });
+  });
+
+  document.addEventListener('dblclick', (e) => {
+    if (!isEditable(e.target)) e.preventDefault();
+  }, { passive: false });
+
+  document.addEventListener('contextmenu', (e) => {
+    if (!isEditable(e.target)) e.preventDefault();
+  });
+
+  // ============================================================
+  //  初期化
+  // ============================================================
+  async function init() {
+    showTab('html');
+    renderAll();
+    const restored = await loadProject();
+    renderAll();
+    showTab(activeTab);
+    if (restored) {
+      setLog('前回の内容を復元しました。', 'ok');
+      if (state.code.html.trim()) runPreview();
+    }
+  }
+
+  init();
 })();

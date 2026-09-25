@@ -2,8 +2,9 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>LOCAL CARTRIDGE | コードプレビューランチャー</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="format-detection" content="telephone=no">
+<title>LOCAL CARTRIDGE | html/css/js プレビューランチャー</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -15,77 +16,126 @@
 
   <header class="app__header">
     <div class="brand">
-      <span class="brand__mark">&#9707;</span>
+      <span class="brand__mark" aria-hidden="true">&#9707;</span>
       <div class="brand__text">
         <h1>LOCAL CARTRIDGE</h1>
         <p>html / css / js を差し込んでその場で実行</p>
       </div>
     </div>
     <div class="cache-badge" id="cacheBadge">
-      <span class="cache-badge__dot" id="cacheDot"></span>
-      <span id="cacheBadgeText">キャッシュ未使用</span>
+      <span class="cache-badge__dot"></span>
+      <span id="cacheBadgeText">未保存</span>
     </div>
   </header>
 
   <main class="workbench">
 
-    <section class="slots" aria-label="ファイル投入スロット">
+    <!-- 左:ファイル読み込み -->
+    <section class="side" aria-label="ファイル読み込み">
 
-      <div class="slot" data-type="html" id="slot-html">
-        <div class="slot__top">
-          <span class="slot__tag slot__tag--html">HTML</span>
-          <span class="slot__req">必須</span>
+      <label class="bulk" for="input-bulk">
+        <span class="bulk__title">3ファイルをまとめて選択</span>
+        <span class="bulk__sub">拡張子で自動振り分け / PCはドラッグ&amp;ドロップも可</span>
+      </label>
+      <input type="file" id="input-bulk" class="file-input" multiple>
+
+      <div class="slot" id="slot-html">
+        <span class="slot__tag slot__tag--html">HTML</span>
+        <div class="slot__body">
+          <p class="slot__name" id="name-html">未選択</p>
+          <p class="slot__meta" id="meta-html">必須</p>
         </div>
-        <div class="slot__drop" id="drop-html">
-          <p class="slot__file" id="name-html">ファイル未選択</p>
-          <p class="slot__hint">クリック or ドラッグ&amp;ドロップ</p>
-        </div>
-        <input type="file" accept=".html,.htm" id="input-html" hidden>
+        <label class="slot__pick" for="input-html">選択</label>
+        <input type="file" id="input-html" class="file-input">
+        <button type="button" class="slot__clear" id="clear-html" aria-label="HTMLを外す" hidden>&times;</button>
       </div>
 
-      <div class="slot" data-type="css" id="slot-css">
-        <div class="slot__top">
-          <span class="slot__tag slot__tag--css">CSS</span>
-          <span class="slot__req">任意</span>
+      <div class="slot" id="slot-css">
+        <span class="slot__tag slot__tag--css">CSS</span>
+        <div class="slot__body">
+          <p class="slot__name" id="name-css">未選択</p>
+          <p class="slot__meta" id="meta-css">任意</p>
         </div>
-        <div class="slot__drop" id="drop-css">
-          <p class="slot__file" id="name-css">ファイル未選択</p>
-          <p class="slot__hint">クリック or ドラッグ&amp;ドロップ</p>
-        </div>
-        <input type="file" accept=".css" id="input-css" hidden>
+        <label class="slot__pick" for="input-css">選択</label>
+        <input type="file" id="input-css" class="file-input">
+        <button type="button" class="slot__clear" id="clear-css" aria-label="CSSを外す" hidden>&times;</button>
       </div>
 
-      <div class="slot" data-type="js" id="slot-js">
-        <div class="slot__top">
-          <span class="slot__tag slot__tag--js">JS</span>
-          <span class="slot__req">任意</span>
+      <div class="slot" id="slot-js">
+        <span class="slot__tag slot__tag--js">JS</span>
+        <div class="slot__body">
+          <p class="slot__name" id="name-js">未選択</p>
+          <p class="slot__meta" id="meta-js">任意</p>
         </div>
-        <div class="slot__drop" id="drop-js">
-          <p class="slot__file" id="name-js">ファイル未選択</p>
-          <p class="slot__hint">クリック or ドラッグ&amp;ドロップ</p>
-        </div>
-        <input type="file" accept=".js" id="input-js" hidden>
+        <label class="slot__pick" for="input-js">選択</label>
+        <input type="file" id="input-js" class="file-input">
+        <button type="button" class="slot__clear" id="clear-js" aria-label="JSを外す" hidden>&times;</button>
       </div>
 
-      <div class="slots__actions">
+      <div class="actions">
         <button type="button" class="btn btn--primary" id="runBtn" disabled>実行する</button>
-        <button type="button" class="btn btn--ghost" id="clearBtn">キャッシュ削除</button>
+        <button type="button" class="btn btn--sub" id="exportBtn" disabled>1ファイルに書き出し</button>
+        <button type="button" class="btn btn--ghost" id="clearAllBtn">キャッシュ削除</button>
       </div>
 
-      <p class="log" id="logText">3つのファイルはブラウザに保存され、キャッシュを消さない限り次回開いた時も残ります。</p>
+      <p class="log" id="logText">読み込んだファイルはブラウザ内に保存され、次回開いた時も自動で復元されます。</p>
 
     </section>
 
-    <section class="preview">
+    <!-- 右:プレビュー -->
+    <section class="preview" id="preview" aria-label="プレビュー">
       <div class="preview__bar">
         <span class="preview__label">PREVIEW</span>
         <span class="preview__state" id="previewState">未実行</span>
+        <div class="preview__tools">
+          <button type="button" class="tool-btn" id="reloadBtn" disabled>再実行</button>
+          <button type="button" class="tool-btn" id="fullBtn">全画面</button>
+        </div>
       </div>
-      <iframe
-        id="previewFrame"
-        title="プレビュー"
-        sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-pointer-lock"
-      ></iframe>
+      <div class="preview__stage">
+        <iframe
+          id="previewFrame"
+          title="プレビュー"
+          sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-pointer-lock allow-downloads"
+          allow="fullscreen; autoplay; clipboard-write"
+        ></iframe>
+        <div class="preview__empty" id="previewEmpty">HTMLを読み込むとここに表示されます</div>
+      </div>
+
+      <div class="console" id="consolePanel">
+        <div class="console__bar">
+          <span class="console__title">コンソール</span>
+          <span class="console__count" id="consoleCount" hidden>0</span>
+          <div class="console__tools">
+            <button type="button" class="tool-btn" id="consoleCopyBtn">コピー</button>
+            <button type="button" class="tool-btn" id="consoleClearBtn">クリア</button>
+            <button type="button" class="tool-btn" id="consoleToggleBtn" aria-expanded="true">閉じる</button>
+          </div>
+        </div>
+        <ol class="console__list" id="consoleList"></ol>
+      </div>
+    </section>
+
+    <!-- 下:エディタ -->
+    <section class="editor" aria-label="コードエディタ">
+      <div class="editor__bar">
+        <div class="tabs" role="tablist">
+          <button type="button" class="tab is-active" role="tab" data-tab="html" aria-selected="true">HTML</button>
+          <button type="button" class="tab" role="tab" data-tab="css" aria-selected="false">CSS</button>
+          <button type="button" class="tab" role="tab" data-tab="js" aria-selected="false">JS</button>
+        </div>
+        <span class="editor__note">直接編集・貼り付けもOK(自動保存 / Ctrl+Enterで実行)</span>
+      </div>
+      <textarea
+        id="editor"
+        class="editor__area"
+        spellcheck="false"
+        autocapitalize="off"
+        autocomplete="off"
+        autocorrect="off"
+        wrap="off"
+        placeholder="ここにHTMLを貼り付けることもできます"
+      ></textarea>
     </section>
 
   </main>
@@ -94,6 +144,10 @@
     made by <a href="https://github.com/h1ro223" target="_blank" rel="noopener noreferrer">hiro / ヒロ</a>
   </footer>
 
+</div>
+
+<div class="drop-overlay" id="dropOverlay" aria-hidden="true">
+  <p>ここにドロップして読み込み</p>
 </div>
 
 <script src="./script.js"></script>
