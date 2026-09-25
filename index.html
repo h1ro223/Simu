@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="format-detection" content="telephone=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CARTRIDGE">
 <title>LOCAL CARTRIDGE | html/css/js プレビューランチャー</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -92,6 +96,9 @@
           <button type="button" class="tool-btn" id="fullBtn">全画面</button>
         </div>
       </div>
+      <button type="button" class="float-handle" id="floatHandle" aria-label="操作バーを表示(ドラッグで移動)">
+        <span class="float-handle__dots" aria-hidden="true"></span>
+      </button>
       <div class="preview__stage">
         <iframe
           id="previewFrame"

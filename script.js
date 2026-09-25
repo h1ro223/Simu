@@ -802,15 +802,155 @@
   els.exportBtn.addEventListener('click', exportFile);
   els.clearAllBtn.addEventListener('click', clearAll);
 
-  // 全画面
+  // ============================================================
+  //  全画面(バーは隠して、フローティングボタンで呼び出す)
+  // ============================================================
+  const floatHandle = $('floatHandle');
+  const previewBar = els.preview.querySelector('.preview__bar');
+  const HANDLE_KEY = 'lc2_handle_pos';
+  const BAR_AUTO_HIDE_MS = 3500;
+  let barTimer = null;
+  // 位置は画面サイズに対する割合で保持(縦横切り替えしてもズレない)
+  let handlePos = { x: 0, y: 0.5 };
+
+  try {
+    const saved = JSON.parse(localStorage.getItem(HANDLE_KEY) || 'null');
+    if (saved && typeof saved.x === 'number' && typeof saved.y === 'number') {
+      handlePos = { x: Math.min(1, Math.max(0, saved.x)), y: Math.min(1, Math.max(0, saved.y)) };
+    }
+  } catch (_) { /* 何もしない */ }
+
+  const isFull = () => els.preview.classList.contains('is-full');
+
+  // ノッチ等を避けた「置ける範囲」
+  function handleArea() {
+    const pRect = els.preview.getBoundingClientRect();
+    const sRect = els.previewFrame.getBoundingClientRect();
+    const size = floatHandle.offsetWidth || 38;
+    const margin = 6;
+    const minX = sRect.left - pRect.left + margin;
+    const minY = sRect.top - pRect.top + margin;
+    const maxX = Math.max(minX, sRect.right - pRect.left - size - margin);
+    const maxY = Math.max(minY, sRect.bottom - pRect.top - size - margin);
+    return { minX, minY, maxX, maxY };
+  }
+
+  function applyHandlePos() {
+    if (!isFull()) return;
+    const a = handleArea();
+    const x = a.minX + (a.maxX - a.minX) * handlePos.x;
+    const y = a.minY + (a.maxY - a.minY) * handlePos.y;
+    floatHandle.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+  }
+
+  function openBar() {
+    els.preview.classList.add('is-bar-open');
+    restartBarTimer();
+  }
+
+  function closeBar() {
+    clearTimeout(barTimer);
+    barTimer = null;
+    els.preview.classList.remove('is-bar-open');
+    if (isFull()) requestAnimationFrame(applyHandlePos);
+  }
+
+  function restartBarTimer() {
+    clearTimeout(barTimer);
+    barTimer = setTimeout(closeBar, BAR_AUTO_HIDE_MS);
+  }
+
   function setFull(on) {
     els.preview.classList.toggle('is-full', on);
     document.body.classList.toggle('is-locked', on);
     els.fullBtn.textContent = on ? '閉じる' : '全画面';
+    if (on) {
+      closeBar();
+      requestAnimationFrame(applyHandlePos);
+    } else {
+      clearTimeout(barTimer);
+      barTimer = null;
+      els.preview.classList.remove('is-bar-open');
+    }
   }
-  els.fullBtn.addEventListener('click', () => setFull(!els.preview.classList.contains('is-full')));
+
+  els.fullBtn.addEventListener('click', () => setFull(!isFull()));
+
+  // バーを触っている間は自動で隠れないようにする
+  previewBar.addEventListener('pointerdown', () => {
+    if (isFull() && els.preview.classList.contains('is-bar-open')) restartBarTimer();
+  });
+
+  // バーが開いている時にプレビュー部分を触ったら閉じる
+  els.preview.querySelector('.preview__stage').addEventListener('pointerdown', () => {
+    if (isFull() && els.preview.classList.contains('is-bar-open')) closeBar();
+  });
+
+  // フローティングボタン:タップでバー表示 / ドラッグで移動
+  let drag = null;
+
+  floatHandle.addEventListener('pointerdown', (e) => {
+    if (!isFull()) return;
+    e.preventDefault();
+    const a = handleArea();
+    drag = {
+      id: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      baseX: a.minX + (a.maxX - a.minX) * handlePos.x,
+      baseY: a.minY + (a.maxY - a.minY) * handlePos.y,
+      area: a,
+      moved: false,
+    };
+    try { floatHandle.setPointerCapture(e.pointerId); } catch (_) { /* 何もしない */ }
+  });
+
+  floatHandle.addEventListener('pointermove', (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const dx = e.clientX - drag.startX;
+    const dy = e.clientY - drag.startY;
+    if (!drag.moved && Math.hypot(dx, dy) < 6) return;
+    drag.moved = true;
+    floatHandle.classList.add('is-dragging');
+    const a = drag.area;
+    const x = Math.min(a.maxX, Math.max(a.minX, drag.baseX + dx));
+    const y = Math.min(a.maxY, Math.max(a.minY, drag.baseY + dy));
+    handlePos = {
+      x: a.maxX > a.minX ? (x - a.minX) / (a.maxX - a.minX) : 0,
+      y: a.maxY > a.minY ? (y - a.minY) / (a.maxY - a.minY) : 0,
+    };
+    floatHandle.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+  });
+
+  function endDrag(e, cancelled) {
+    if (!drag || e.pointerId !== drag.id) return;
+    const wasMoved = drag.moved;
+    drag = null;
+    floatHandle.classList.remove('is-dragging');
+    try { floatHandle.releasePointerCapture(e.pointerId); } catch (_) { /* 何もしない */ }
+    if (wasMoved) {
+      try { localStorage.setItem(HANDLE_KEY, JSON.stringify(handlePos)); } catch (_) { /* 何もしない */ }
+    } else if (!cancelled) {
+      openBar();
+    }
+  }
+
+  floatHandle.addEventListener('pointerup', (e) => endDrag(e, false));
+  floatHandle.addEventListener('pointercancel', (e) => endDrag(e, true));
+
+  // キーボード操作用(Enter / Space)
+  floatHandle.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      openBar();
+    }
+  });
+
+  window.addEventListener('resize', () => requestAnimationFrame(applyHandlePos));
+  window.addEventListener('orientationchange', () => setTimeout(applyHandlePos, 250));
+
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && els.preview.classList.contains('is-full')) setFull(false);
+    if (e.key === 'Escape' && isFull()) setFull(false);
   });
 
   // コンソール操作
